@@ -72,10 +72,13 @@ class DisplayController:
         return token_limit, token_limit
 
     def _calculate_time_data(
-        self, session_data: Dict[str, Any], current_time: datetime
+        self, session_data: Dict[str, Any], current_time: datetime,
+        reset_hour_utc: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Calculate time-related data for the session."""
-        return self.session_calculator.calculate_time_data(session_data, current_time)
+        return self.session_calculator.calculate_time_data(
+            session_data, current_time, reset_hour_utc
+        )
 
     def _calculate_cost_predictions(
         self,
@@ -341,8 +344,9 @@ class DisplayController:
         )
         tokens_left = token_limit - tokens_used
 
-        # Calculate time data
-        time_data = self._calculate_time_data(session_data, current_time)
+        # Calculate time data; reset_hour (UTC) aligns reset display with Claude.ai
+        reset_hour_utc = getattr(args, "reset_hour", None)
+        time_data = self._calculate_time_data(session_data, current_time, reset_hour_utc)
 
         # Calculate burn rate
         burn_rate = calculate_hourly_burn_rate(data["blocks"], current_time)
@@ -580,13 +584,17 @@ class SessionCalculator:
         self.tz_handler = TimezoneHandler()
 
     def calculate_time_data(
-        self, session_data: Dict[str, Any], current_time: datetime
+        self, session_data: Dict[str, Any], current_time: datetime,
+        reset_hour_utc: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Calculate time-related data for the session.
 
         Args:
             session_data: Dictionary containing session information
             current_time: Current UTC time
+            reset_hour_utc: If set, override reset_time with next occurrence of
+                this UTC hour (e.g. 14 = next 14:00 UTC), matching Claude.ai's
+                weekly reset display.
 
         Returns:
             Dictionary with calculated time data
@@ -608,14 +616,26 @@ class SessionCalculator:
                 else current_time + timedelta(hours=5)  # Default session duration
             )
 
+        # Override with the daily/weekly reset hour when configured.
+        # This aligns "Time to Reset" with Claude.ai's session reset display
+        # (e.g. reset_hour_utc=14 → next 14:00 UTC, ~matching "Resets Wed 2 PM UTC").
+        if reset_hour_utc is not None:
+            target = current_time.replace(
+                hour=reset_hour_utc, minute=0, second=0, microsecond=0
+            )
+            if target <= current_time:
+                target += timedelta(days=1)
+            reset_time = target
+
         # Calculate session times
         time_to_reset = reset_time - current_time
         minutes_to_reset = time_to_reset.total_seconds() / 60
 
-        if start_time and session_data.get("end_time_str"):
+        if start_time:
             total_session_minutes = (reset_time - start_time).total_seconds() / 60
-            elapsed_session_minutes = (current_time - start_time).total_seconds() / 60
-            elapsed_session_minutes = max(0, elapsed_session_minutes)
+            elapsed_session_minutes = max(
+                0, (current_time - start_time).total_seconds() / 60
+            )
         else:
             total_session_minutes = 5 * 60  # Default session duration in minutes
             elapsed_session_minutes = max(0, total_session_minutes - minutes_to_reset)
